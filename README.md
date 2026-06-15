@@ -4,6 +4,7 @@
 1. [Splunk: Exploring SPL](#splunk-exploring-spl)
 2. [Splunk 2](#splunk-2)
 3. [Investigating with Splunk](#investigating-with-splunk)
+4. [Incident Handling With Splunk](#incident-handling-with-splunk)
 
 ## Splunk: Exploring SPL
 ### Search and Reporting
@@ -538,3 +539,178 @@
     | stats values(Host_App) as "Extracted Host Applications"
     ```
     Once we extract the encoded PowerShell script, we can decode it by using cyberchef. We will find the URL is `hxxp[://]10[.]10[.]10[.]5/news[.]php`. We need to defang the URL to get the answer, which is `hxxp[://]10[.]10[.]10[.]5/news[.]php`.
+
+
+## Incident Handling With Splunk
+### Reconnaissance Phase
+1. One suricata alert highlighted the CVE value associated with the attack attempt. What is the CVE value?
+
+    In this case, we need to investigate reconnaissance of `imreallynotbatman.com` server. We already have suspicious ip address `40.80.148.42`. We can use the following query to narrow down the reconnaissance activity:
+
+    ```spl
+    index=botsv1 imreallynotbatman.com src=40.80.148.42 sourcetype=suricata
+    ```
+    We can check the `alert.signature` field to find the CVE value, which is `CVE-2014-6271`. So the answer is `CVE-2014-6271`.
+
+2. What is the CMS our web server is using?
+
+    We can use the following query to find the CMS of the web server by examining the `stream:http`:
+
+    ```spl
+    index=botsv1 imreallynotbatman.com sourcetype=stream:http
+    ```
+    ![alt text](<Assets/Incident Handling with Splunk/1.png>)
+
+    We can see that `joomla` is mentioned in the `src_content` field. So the answer is `joomla`.
+
+3. What is the web scanner, the attacker used to perform the scanning attempts?
+
+    We can filter by using the suspicious ip address and check the `http_user_agent` field to find the web scanner:
+
+    ```spl
+    index=botsv1 imreallynotbatman.com sourcetype=stream:http src_ip=40.80.148.42 
+    | dedup http_user_agent
+    | table http_user_agent
+    ```
+    ![alt text](<Assets/Incident Handling with Splunk/2.png>)
+
+    We can see that `acunetix` is mentioned in the `http_user_agent` field. So the answer is `acunetix`.
+
+4. What is the IP address of the server imreallynotbatman.com?
+
+    We can use the following query to find the IP address of the server and check the `dest_ip` field:
+
+    ```spl
+    index=botsv1 imreallynotbatman.com sourcetype=stream:http
+    ```
+    The answer is `192.168.250.70`.
+
+### Exploitation Phase
+1. What was the URI which got multiple brute force attempts?
+
+    We can filter it by checking the `uri` field and counting the number of requests for each URI that has `http_method=POST` and destination ip address of the `iamreallynotbatman.com` server:
+
+    ```spl
+    index=botsv1 sourcetype=stream:http dest_ip="192.168.250.70" http_method=POST | stats count(uri) as Requests by uri | sort - Requests
+    ```
+    ![alt text](<Assets/Incident Handling with Splunk/3.png>)
+
+    We can see that the most suspicious URI is `/joomla/administrator/index.php` since it is the admin panel of the joomla CMS and common target for brute force attack. We can make sure by checking it with this query:
+
+    ```spl
+    index=botsv1 sourcetype=stream:http dest_ip="192.168.250.70" http_method=POST uri="/joomla/administrator/index.php" | table _time uri src_ip dest_ip form_data
+    ```
+    ![alt text](<Assets/Incident Handling with Splunk/4.png>)
+
+    We can see that there are many requests to this URI in the short period of time. So the answer is `/joomla/administrator/index.php`.
+
+2. Against which username was the brute force attempt made?
+
+    We can see the previous query already shows the `form_data` field which contains the username. The answer is `admin`.
+
+3. What was the correct password for admin access to the content management system running imreallynotbatman.com?
+
+    If we use this query below, we can extract the password from the `form_data` field by using `rex` command:
+
+    ```spl
+    index=botsv1 sourcetype=stream:http dest_ip="192.168.250.70" http_method=POST form_data=*username*passwd* | rex field=form_data "passwd=(?<creds>\w+)" |table _time src_ip uri http_user_agent creds
+    ```
+    ![alt text](<Assets/Incident Handling with Splunk/5.png>)
+
+    There are only two `http_user_agent` values, `Python-urllib/2.7` and `Mozilla/5.0`. The mozilla user agent is more likely to be the successful login since it is a common user agent for web browser and it only has one request. The answer is `batman`.
+
+4. How many unique passwords were attempted in the brute force attempt?
+
+    The user agent `Python-urllib/2.7` is more likely to be the brute force attempt since it has many requests. It has ip address `23.22.63.114`. We can filter by using this user agent and ip address to find the unique passwords attempted in the brute force attempt:
+
+    ```spl
+    index=botsv1 sourcetype=stream:http dest_ip="192.168.250.70" src_ip="23.22.63.114" http_method=POST form_data=*username*passwd* | rex field=form_data "passwd=(?<creds>\w+)"  | dedup creds | table src_ip creds
+    ```
+    The answer is `412`.
+
+5. What IP address is likely attempting a brute force password attack against imreallynotbatman.com?
+
+    We already know the answer is `23.22.63.114` based on the previous analysis.
+
+6. After finding the correct password, which IP did the attacker use to log in to the admin panel?
+
+    We already know the answer is `40.80.148.42` based on question number 3.
+
+### Installation Phase
+1. Sysmon also collects the Hash value of the processes being created. What is the MD5 HASH of the program 3791.exe?
+
+    By filtering with the attacker ip address that we have found in the previous question and filtering with the keyword `*.exe`, we can find the malicious `3791.exe` file. Then we can use the following query to extract the MD5 hash from the `Hash` field:
+
+    ```spl
+    index=botsv1 "3791.exe" sourcetype="XmlWinEventLog" EventCode=1
+    ```
+    The answer is `AAE3F5A29935E6ABCC2C2754D12A9AF0`.
+
+2. Looking at the logs, which user executed the program 3791.exe on the server?
+
+    We can check the `User` field to find the user that executed the program `3791.exe`.
+
+    ```spl
+    index=botsv1 "3791.exe" sourcetype="XmlWinEventLog" EventCode=1 AAE3F5A29935E6ABCC2C2754D12A9AF0
+    ```
+    The answer is `NT AUTHORITY\IUSR`.
+
+3. Search hash on the virustotal. What other name is associated with this file 3791.exe?
+
+    We can search the hash value `AAE3F5A29935E6ABCC2C2754D12A9AF0` in the virus total to find the other name associated with this file. The answer is `ab.exe`.
+
+### Action on Objective
+1. What is the name of the file that defaced the imreallynotbatman.com website ?
+
+    The `iamreallynotbatman.com` server has ip address `192.168.250.70`. When we use it as a `src_ip` filter, we will find that this ip make connection to `23.22.63.114` which is the attacker ip address that we have found earlier. We can check the `uri` field to find the name of the file that defaced the website:
+
+    ```spl
+    index=botsv1 src=192.168.250.70 sourcetype=suricata dest_ip=23.22.63.114
+    ```
+    The answer is `poisonivy-is-coming-for-you-batman.jpeg`.
+
+2. Fortigate Firewall 'fortigate_utm' detected SQL attempt from the attacker's IP 40.80.148.42. What is the name of the rule that was triggered during the SQL Injection attempt?
+
+    We can filter by using the attacker ip address and `sourcetype=fortigate_utm` to find the rule that was triggered during the SQL Injection attempt:
+
+    ```spl
+    index=botsv1 src=40.80.148.42 sourcetype=fortigate_utm dest_ip=192.168.250.70 SQL
+    ```
+    We can check the `attack` field to find the name of the rule. The the answer is `HTTP.URI.SQL.Injection`.
+
+### Command and Control Phase
+1. This attack used dynamic DNS to resolve to the malicious IP. What fully qualified domain name (FQDN) is associated with this attack?
+
+    First we need to find out the malicious IP address used in this attack. We can check the `src_ip` and `dest_ip` field to find the malicious IP address that the installed binary is connecting to. We can use the following query to find the malicious IP address:
+
+    ```spl
+    index=botsv1 sourcetype=fortigate_utm"poisonivy-is-coming-for-you-batman.jpeg"
+    ```
+    We will get `dest_ip` which is `23.22.63.114` and `src_ip` which is `192.168.250.70`. We can use the following query to find the FQDN associated with this attack by using the malicious IP address:
+
+    ```spl
+    index=botsv1 sourcetype=stream:http dest_ip=23.22.63.114 src_ip=192.168.250.70
+    ```
+    We can check the `site` field to find the FQDN. The answer is `prankglassinebracket.jumpingcrab.com`.
+
+### Weaponization Phase
+1. What IP address has P01s0n1vy tied to domains that are pre-staged to attack Wayne Enterprises?
+
+    `www.po1s0n1vy.com` is the domain that is returned when we search the attacke ip address`23.22.63.114` in the virusTotal database. So the answer is `23.22.63.114`.
+
+2. Based on the data gathered from this attack and common open-source intelligence sources for domain names, what is the email address that is most likely associated with the P01s0n1vy APT group?
+
+    We can use [alienvault](https://otx.alienvault.com/indicator/hostname/www.po1s0n1vy.com) to find the email address that is most likely associated with the P01s0n1vy APT group. The answer is `lillian.rose@po1s0n1vy.com`.
+
+### Delivery Phase
+1. What is the HASH of the Malware associated with the APT group?
+
+    We can go to virustotal and check the attacker ip address that we have found so far, which is `23.22.63.114`.
+
+    ![alt text](<Assets/Incident Handling with Splunk/6.png>)
+
+    In the relations section, in the referring files, we can find the malware file with the name `	MirandaTateScreensaver.scr.exe`. We can check the hash value of this file, which is `c99131e0169171935c5ac32615ed6261`. The answer is `c99131e0169171935c5ac32615ed6261`.
+
+2. What is the name of the Malware associated with the Poison Ivy Infrastructure?
+
+    We have found it in the previous question, which is `MirandaTateScreensaver.scr.exe`. So the answer is `MirandaTateScreensaver.scr.exe`.
