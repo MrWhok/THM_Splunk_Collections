@@ -3,7 +3,7 @@
 ## Table of Contents
 1. [Splunk: Exploring SPL](#splunk-exploring-spl)
 2. [Splunk 2](#splunk-2)
-
+3. [Investigating with Splunk](#investigating-with-splunk)
 
 ## Splunk: Exploring SPL
 ### Search and Reporting
@@ -459,3 +459,82 @@
     ![alt text](<Assets/Splunk 2/14.png>)
 
     The answer is `process.php`.
+
+## Investigating with Splunk
+1. How many events were collected and Ingested in the index main?
+
+    The answer is `12256`.
+
+2. On one of the infected hosts, the adversary was successful in creating a backdoor user. What is the new username?
+
+    We can filter by using EventID `4720` which is the event of creating a new user:
+
+    ```spl
+    index="main" EventID="4720"
+    ```
+    The answer is `A1berto`.
+
+3. On the same host, a registry key was also updated regarding the new backdoor user. What is the full path of that registry key?
+
+    The hostname of the infected host is `Micheal.Beaven`. We can filter by using this hostname and the keyword `A1berto`:
+
+    ```spl
+    index="main" Hostname="Micheal.Beaven" A1berto
+    ```
+
+    ![alt text](<Assets/Investigating with Splunk/1.png>)
+
+    The answer is `HKLM\SAM\SAM\Domains\Account\Users\Names\A1berto`.
+
+4. Examine the logs and identify the user that the adversary was trying to impersonate.
+
+    If we check all available users, we can find the user `Alberto` which is similar to the backdoor user `A1berto`. So the answer is `Alberto`.
+
+5. What is the command used to add a backdoor user from a remote computer?
+
+    We can filter by using the keyword `net user` which is a common command to add a user:
+
+    ```spl
+    index="main" A1berto "net user"
+    ```
+    ![alt text](<Assets/Investigating with Splunk/2.png>)
+
+    The answer is `C:\windows\System32\Wbem\WMIC.exe" /node:WORKSTATION6 process call create "net user /add A1berto paw0rd1`.
+
+6. How many times was the login attempt from the backdoor user observed during the investigation?
+
+    We can filter by using the EventID `4624` which is the event of successful login or EventID `4625` which is the event of failed login:
+
+    ```spl
+    index="main" (EventID="4624" OR EventID="4625") A1berto
+    ```
+    The answer is `0`.
+
+7. What is the name of the infected host on which suspicious Powershell commands were executed?
+
+    We can filter by using the keyword `powershell`:
+
+    ```spl
+    index="main" A1berto powershell
+    ```
+    Then, we can check the `Hostname` field to find the name of the infected host, which is `James.browne`. So the answer is `James.browne`.
+
+8. PowerShell logging is enabled on this device. How many events were logged for the malicious PowerShell execution?
+
+    We can filter by using the EventID `4103` which is the event of PowerShell Module Logging:
+
+    ```spl
+    index="main" EventID="4103"
+    ```
+    The answer is `79`.
+
+9. An encoded Powershell script from the infected host initiated a web request. What is the full URL?
+
+    We can extract the encoded PowerShell script and decode it by using cyberchef to find the URL. We can use the following query to extract the encoded PowerShell script:
+
+    ```spl
+    index="main" EventID="4103" Hostname="James.browne"
+    | rex field=ContextInfo "Host Application\s*=\s*(?<Host_App>[^\r\n]+)"
+    | stats values(Host_App) as "Extracted Host Applications"
+    ```
+    Once we extract the encoded PowerShell script, we can decode it by using cyberchef. We will find the URL is `hxxp[://]10[.]10[.]10[.]5/news[.]php`. We need to defang the URL to get the answer, which is `hxxp[://]10[.]10[.]10[.]5/news[.]php`.
