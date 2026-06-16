@@ -5,6 +5,7 @@
 2. [Splunk 2](#splunk-2)
 3. [Investigating with Splunk](#investigating-with-splunk)
 4. [Incident Handling With Splunk](#incident-handling-with-splunk)
+5. [Monitoring Active Directory](#monitoring-active-directory)
 
 ## Splunk: Exploring SPL
 ### Search and Reporting
@@ -714,3 +715,101 @@
 2. What is the name of the Malware associated with the Poison Ivy Infrastructure?
 
     We have found it in the previous question, which is `MirandaTateScreensaver.scr.exe`. So the answer is `MirandaTateScreensaver.scr.exe`.
+
+## Monitoring Active Directory
+### Authentication Events
+1. Which file stores domain user credentials on the domain controller?
+
+    The answer is `NTDS.dit`.
+
+2. A local user authenticates to a workstation. Will this generate any events on the Domain Controller? (Answer Format: Yea or Nay)
+
+    The answer is `Nay`.
+
+3. What Event ID is generated when a user requests a TGT?
+
+    The answer is `4768`.
+
+4. In win index in Splunk, how many unique accounts requested TGTs in the dataset across all time?
+
+    We can use the following query to find the unique accounts that requested TGTs:
+
+    ```spl
+    index=* EventCode=4768
+    | dedup Account_Name
+    ```
+    The answer is `14`.
+
+### Accounts, Groups, and Resource Access Events
+1. In Splunk, what field contains the group name?
+
+    The answer is `Group_Name`.
+
+2. In Splunk, what is the MOST common logon type in the dataset?
+
+    We can use the following query to find the most common logon type in the dataset:
+
+    ```spl
+    index=* EventCode=4624
+    | stats count by Logon_Type
+    | sort -count
+    ```
+    The answer is `3`.
+
+### Understanding Baseline Activity
+1. What character suffix identifies computer accounts in AD?
+
+    The answer is `$`.
+
+2. Using Event ID 4769, what is the MOST frequently requested service?
+
+    We can use the following query to find the most frequently requested service:
+
+    ```spl
+    index=* EventCode=4769 
+    | stats count by Service_Name 
+    | sort -count
+    ```
+    The answer is `THM-DC$`.
+
+### Audit Policy Configuration
+1. What command displays all current audit policy settings on a domain controller?
+
+    The answer is `auditpol /get /category:*`.
+
+### Scenario: New Employee Onboarding Audit
+1. What is the name of the newly created account?
+
+    We can filter by using the EventID `4720` which is the event of creating a new user:
+
+    ```spl
+    index=* EventCode=4720
+    | table _time, SAM_Account_Name, Subject_Account_Name
+    ```
+    ![alt text](<Assets/Monitoring Active Directory/1.png>)
+
+    The answer is `nathan.brooks`.
+
+2.  Who created this account?
+
+    We can see the `Subject_Account_Name` field in the previous query result. The answer is `adm-luke.sullivan`.
+
+3. What group was this user added to?
+
+    We can filter by using the EventID `4728`, `4732`, or `4756` which are the events of adding a user to a group:
+
+    ```spl
+    index=* (EventCode=4728 OR EventCode=4732 OR EventCode=4756)
+    | table _time, Member_Account_Name, Group_Name, Subject_Account_Name
+    ```
+    The answer is `Marketing`.
+
+4. What was the source IP address of nathan.brooks's first TGT request?
+
+    We can filter by using the EventID `4768` which is the event of requesting a TGT and the keyword `nathan`.
+
+    ```spl
+    index=* EventCode=4768 nathan
+    ```
+
+    Then we can check the `src_ip` field to find the source IP address of nathan.brooks's first TGT request, which is `10.5.50.12`.
