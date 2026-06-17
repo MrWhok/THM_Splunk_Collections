@@ -6,6 +6,7 @@
 3. [Investigating with Splunk](#investigating-with-splunk)
 4. [Incident Handling With Splunk](#incident-handling-with-splunk)
 5. [Monitoring Active Directory](#monitoring-active-directory)
+6. [Detecting AD Initial Access](#detecting-ad-initial-access)
 
 ## Splunk: Exploring SPL
 ### Search and Reporting
@@ -813,3 +814,189 @@
     ```
 
     Then we can check the `src_ip` field to find the source IP address of nathan.brooks's first TGT request, which is `10.5.50.12`.
+
+
+## Detecting AD Initial Access
+### Understanding IIS and its Logs
+1. Where does IIS store access logs by default?
+
+    The answer is `C:\inetpub\logs\LogFiles\W3SVC1`.
+
+### Detecting Web Shell Deployment
+1. What is the filename of the web shell the attacker used?
+
+    First, we need to identify common attacker first step which is reconnaissance. We can use the following query to find the reconnaissance activity:
+
+    ```spl
+    index=iis sc_status=404
+    | stats count by c_ip
+    | sort - count
+    ```
+    We will find that there is one ip address `203.0.113.47`. Then we can use this ip address to find suspicious files by checking the `cs_uri_stem` field:
+
+    ```spl
+    index=iis c_ip=203.0.113.47 sc_status=200
+    | stats count by cs_uri_stem
+    | sort - count
+    ```
+    ![alt text](<Assets/Detecting AD Initial Access/1.png>)
+
+    We can see that there is a suspicious file `shell.aspx` which is the web shell the attacker used. So the answer is `shell.aspx`.
+
+2. What IP address was used to interact with the web shell?
+
+    We have already found the ip address `203.0.113.47` in the previous question.
+
+3. After accessing the web shell, what was the first reconnaissance command the attacker executed?
+
+    We can use the following query to find the first reconnaissance command the attacker executed by checking the `cs_uri_stem` and `cs_uri_query`:
+
+    ```spl
+    index=iis c_ip=203.0.113.47 sc_status=200 cs_uri_stem="/aspnet_client/system_web/shell.aspx" 
+    | table _time, c_ip, cs_uri_stem, cs_uri_query, sc_status
+    | sort _time
+    ```
+    The answer is `whoami`.
+
+### Exchange, OWA, and Credential Attacks
+1. What virtual directory path provides access to the Exchange admin console? (Answer Format: /path)
+
+    The answer is `/ecp`.
+
+2. When investigating an OWA brute-force attack, IIS logs show the attacker's source IP but not the targeted username. Which Windows Event ID should you check to find the targeted account?
+
+    We can check the EventID `4625` which is the event of failed login to find the targeted account.
+
+### Detecting OWA Brute-Force Attacks
+1. How many failed login attempts occurred during the OWA brute-force attack?
+
+    We can examine the logs and filter by using the EventID `4625` which is the event of failed login:
+
+    ```spl
+    index=win EventCode=4625
+    | stats count by user, Logon_Type
+    | sort - count
+    ```
+    ![alt text](<Assets/Detecting AD Initial Access/2.png>)
+
+    The answer is `15`.
+
+2. What username was successfully compromised in this attack?
+
+    In the previous question, we have found the highest targeted user is `sarah.kim`. We can check the EventID `4624` and `4625` to find the successful login attempt by this user:
+
+    ```spl
+    index=win EventCode IN (4624, 4625) user="sarah.kim" Logon_Type=8
+    | table _time, EventCode, user, Process_Name, Logon_Type
+    | sort _time
+    ```
+    ![alt text](<Assets/Detecting AD Initial Access/3.png>)
+
+    We can see that there is a successful login attempt with EventID `4624`. So the answer is `sarah.kim`.
+
+3. What source IP address conducted this brute-force attack?
+
+    We can examine iis logs and filter by using the `cs_uri_stem` field with the value `/owa/auth.owa` and `cs_method=POST` to find the source IP address that conducted this brute-force attack:
+
+    ```spl
+    index=iis cs_uri_stem="/owa/auth.owa" cs_method=POST
+    | bin _time span=5m
+    | stats count by _time, c_ip
+    | where count > 10
+    | sort - count
+    ```
+    The answer is `203.0.113.47`.
+
+4. After the successful login, what path did the attacker access to reach the Exchange admin console? (Answer Format: /path)
+
+    We can use the following query to find the path that the attacker accessed to reach the Exchange admin console by filtering with the source IP address `203.0.113.47`:
+
+    ```spl
+    index=iis c_ip="203.0.113.47" 
+    | table _time, cs_uri_stem
+    | sort _time
+    ```
+    The answer is `/ecp`.
+
+### VPN and Active Directory
+1. What Windows Event ID indicates that NPS granted network access to a VPN user?
+
+    The answer is `6272`.
+
+2. In a typical enterprise VPN deployment, what protocol does the VPN gateway use to communicate authentication requests to NPS?
+
+    The answer is `RADIUS`.
+
+### Detecting VPN Credential Attacks
+1. What username was successfully compromised via VPN after the credential attack?
+
+    First, we need to find the targeted username by using brute-force attack. We can filter by using the EventID `6273` which is the event of failed login attempt:
+
+    ```spl
+    index=win EventCode=6273
+    | stats count by User_Account_Name, Client_IP_Address
+    | sort - count
+    ```
+
+    ![alt text](<Assets/Detecting AD Initial Access/4.png>)
+
+    We can see that the most targeted user is `david.chen`. Then we can check the EventID `6272` and `6273` to find wether the user `david.chen` has a successful login attempt or not:
+
+    ```spl
+    index=win EventCode IN (6273,6272) User_Account_Name=david.chen
+    | table _time, EventCode, User_Account_Name, Client_IP_Address
+    ```
+    ![alt text](<Assets/Detecting AD Initial Access/5.png>)
+
+    We can see that there is a successful login attempt with EventID `6272`. So the answer is `david.chen`.
+
+2. Based on the NPS access-accept event, at what time did the successful VPN authentication occur? (Answer Format: HH:MM:SS)
+
+    We can check the `_time` field in the previous query to find the time of the successful VPN authentication, which is `10:47:06`.
+
+### Investigating Challenge
+1. What is the filename of the web shell the attacker deployed?
+
+    First, we need to identify common attacker first step which is reconnaissance. We can use the following query to find the reconnaissance activity:
+
+    ```spl
+    index=iis sc_status=404
+    | stats count by c_ip
+    | sort - count
+    ```
+    We will find that there is one ip address `198.51.100.23`. Then we can use this ip address to find suspicious files by checking the `cs_uri_stem` field:
+
+    ```spl
+    index=iis c_ip=198.51.100.23 sc_status=200
+    | stats count by cs_uri_stem
+    | sort - count
+    ```
+    We will find a suspicious file `error.aspx` which is the web shell the attacker used. So the answer is `error.aspx`.
+
+2. What was the first reconnaissance command the attacker executed through the web shell?
+
+    We can use the following query to find the first reconnaissance command the attacker executed by checking the `cs_uri_stem` and `cs_uri_query`:
+
+    ```spl
+    index=iis c_ip=198.51.100.23 sc_status=200 cs_uri_stem="/aspnet_client/system_web/error.aspx" 
+    | table _time, c_ip, cs_uri_stem, cs_uri_query, sc_status
+    | sort _time
+    ```
+    The answer is `hostname`.
+
+3. What URI path was used to upload the web shell to the server? (Answer Format: /path/file.ext)
+
+    We can use the following query with the keyword `error.aspx` and `cs_method=POST` to find the URI path that was used to upload the web shell to the server:
+
+    ```spl
+    index=iis cs_method=POST cs_uri_query="*error.aspx*"
+    | table _time, c_ip, cs_uri_stem, cs_uri_query, sc_status
+    | sort _time
+    ```
+    ![alt text](<Assets/Detecting AD Initial Access/6.png>)
+
+    We can check `cs_uri_stem` field The answer is `/internalapp/upload.aspx`.
+
+4. At what time was the web shell file created on the server? (Answer Format: HH:MM:SS)
+
+    We can check the `_time` field in the previous query to find the time when the web shell file was created on the server, which is `10:40:33`.
