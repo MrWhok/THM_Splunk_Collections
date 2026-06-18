@@ -7,6 +7,7 @@
 4. [Incident Handling With Splunk](#incident-handling-with-splunk)
 5. [Monitoring Active Directory](#monitoring-active-directory)
 6. [Detecting AD Initial Access](#detecting-ad-initial-access)
+7. [Detecting AD Lateral Movement](#detecting-ad-lateral-movement)
 
 ## Splunk: Exploring SPL
 ### Search and Reporting
@@ -1000,3 +1001,226 @@
 4. At what time was the web shell file created on the server? (Answer Format: HH:MM:SS)
 
     We can check the `_time` field in the previous query to find the time when the web shell file was created on the server, which is `10:40:33`.
+
+
+## Detecting AD Lateral Movement
+### Discovery and Reconnaissance
+1. What is the first discovery command the attacker executed?
+ 
+    We can use the following query to find the common discovery command the attacker executed by checking the `CommandLine` field:
+
+    ```spl
+    index=win EventCode=1
+    | search CommandLine IN ("*nltest*", "*net * user*", "*net * group*", "*net * view*", "*net * localgroup*")
+    | table _time, host, User, Image, CommandLine, ParentImage
+    ```
+    The answer is `nltest  /domain_trusts`.
+
+2. What is the full PowerShell command used to enumerate domain users?
+
+    We can use the following query to find the PowerShell command used to enumerate domain users by filtering with the keyword `Get-ADUser`:
+
+    ```spl
+    index=win EventCode=4104
+    | search Message IN ("*Get-ADUser*")
+    | table _time, Message
+    | sort _time
+    ```
+    The answer is `Import-Module ActiveDirectory; Get-ADUser -Filter * -Properties MemberOf | Select-Object Name, SamAccountName`.
+
+### How Lateral Movement Works
+1. What Logon Type in Event 4624 indicates a remote desktop session?
+
+    The answer is `10`.
+
+2. What Event ID, logged on the source system, records when a process uses alternate credentials to connect to a remote resource?
+
+    The answer is `4648`.
+
+### Detecting SMB Lateral Movement
+1. What account was used to access the ADMIN$ shares?
+
+    We can use the following query to find the account that was used to access the ADMIN$ shares by filtering with the keyword `ADMIN$`:
+
+    ```spl
+    index=win EventCode=5140 Share_Name IN ("*\\ADMIN$\*")
+    | table _time, host, Source_Address, user, Share_Name
+    | sort _time
+    ```
+    ![alt text](<Assets/Detecting AD Lateral Movement/1.png>)
+
+    The answer is `luke.sullivan`.
+
+2. Which user account was responsible for executing the lateral movement commands?
+
+    In the previous, we have found the source address of the user that accessed the ADMIN$ shares is `10.5.50.12`. We can use it to find the machine hostname:
+
+    ```spl
+    index=win EventCode=4624 Source_Network_Address=10.5.50.12 user=*$
+    | stats count by user, Source_Network_Address
+    | sort -count
+    ```
+    ![alt text](<Assets/Detecting AD Lateral Movement/2.png>)
+
+    We can see that the user account is `THM-MKT-WS$`. Then we can use this hostname to find the user account that was responsible for executing the lateral movement commands:
+
+    ```spl
+    index=win EventCode=1 host=THM-MKT-WS CommandLine="*ADMIN$*"
+    | table _time, User, Image, CommandLine
+    | sort _time
+    ```
+    ![alt text](<Assets/Detecting AD Lateral Movement/3.png>)
+
+    The answer is `michelle.smith`.
+
+### Detecting PsExec Lateral Movement
+1. What was the destination host the attacker targeted via PsExec?
+
+    We can use eventcode `7045` which is the event of service installation to find the destination host that the attacker targeted via PsExec:
+
+    ```spl
+    index=win EventCode=7045
+    | table _time, host, Service_Name, Service_File_Name, Service_Type, Service_Start_Type, Service_Account
+    | sort _time
+    ```
+    ![alt text](<Assets/Detecting AD Lateral Movement/4.png>)
+
+    The answer is `THM-SQL-SRV`.
+
+2. What is the first command that the attacker executed from the source machine using PsExec?
+
+    First, we need to find the source machine that executed the PsExec command. We can use the following query to find the source machine by filtering with the destination host `THM-SQL-SRV` and eventcode `5145` which is the event of detailed file share access:
+
+    ```spl
+    index=win EventCode=5145 host=THM-SQL-SRV Relative_Target_Name="*PSEXE*"
+    | table _time, user, Source_Address, Share_Name, Relative_Target_Name
+    | sort _time
+    ```
+
+    ![alt text](<Assets/Detecting AD Lateral Movement/5.png>)
+
+    We can see that the source address is `10.5.50.12`. We can use it to find the hostname of the source machine:
+
+    ```spl
+    index=win EventCode=4624 Source_Network_Address=10.5.50.12 user=*$
+    | stats count by user, Source_Network_Address
+    | sort -count
+    ```
+    The hostname output will be `THM-MKT-WS$`. Then we can use this hostname to find the first command that the attacker executed from the source machine using PsExec:
+
+    ```spl
+    index=win EventCode=1 host=THM-MKT-WS
+    | search Image="*PsExec*"
+    | table _time, host, User, Image, CommandLine
+    | sort _time
+    ```
+    ![alt text](<Assets/Detecting AD Lateral Movement/6.png>)
+
+    The answer is `C:\Tools\PsExec.exe  -accepteula \\THM-SQL-SRV cmd /c "hostname & whoami & ipconfig"`.
+
+### Detecting RDP Lateral Movement
+1. What is the source IP address of the RDP session that landed on the Domain Controller?
+
+    In the THM it already stated that RDP session is investigated when something suspicious happened. So we dont investigate the RDP session by default. We can use the following query to find the suspicious command that the attacker executed by filtering with the EventCode `1` and the hostname of the domain controller `THM-DC`:
+
+    ```spl
+    index=win EventCode=1 host=THM-DC
+    | search CommandLine IN ("*nltest*", "*net * user*", "*net * group*", "*net * view*")
+    | table _time, host, User, Image, CommandLine, LogonId
+    | sort _time
+    ```
+    ![alt text](<Assets/Detecting AD Lateral Movement/7.png>)
+
+    We can see the `LogonId` field is `	0x508C55A`. We can use this logon id to identify how the attacker logged in to the domain controller. 
+
+    ```spl
+    index=win EventCode=4624 host=THM-DC Logon_ID=0x508C55A
+    | table _time, user, Logon_Type, Source_Network_Address, Logon_ID
+    ```
+    The answer is `10.5.30.120`.
+
+2. Tracing backward through the chain, what is the original source IP where the RDP chain began?
+
+    We can use the following query to find the original source IP where the RDP chain began by filtering with the EventCode `4624` and the source ip address `10.5.30.120`:
+
+    ```spl
+    index=win EventCode=4624 Source_Network_Address=10.5.30.120 user=*$
+    | stats count by user, Source_Network_Address
+    | sort -count
+    ```
+    We will get the hotstname is `THM-SQL-SRV$`. Then we can use this hostname to find the LogonId of the RDP session:
+
+    ```spl
+    index=win EventCode=1 host=THM-SQL-SRV Image="*mstsc.exe*"
+    | table _time, User, Image, CommandLine, LogonId
+    | sort _time
+    ```
+    We will get the LogonId is `0x3C572BD`. We can use this logon id to find the source ip address of the RDP session:
+
+    ```spl
+    index=win EventCode=4624 host=THM-SQL-SRV Logon_ID=0x3C572BD
+    | table _time, user, Logon_Type, Source_Network_Address, Logon_ID
+    ```
+    We will get the source ip address is `10.5.50.12`.
+
+### Investigation Challenge
+1. What is the full path of the service binary that was installed on the target?
+
+    We can use the following query to find the full path of the service binary that was installed on the target by filtering with the EventCode `7045` which is the event of service installation:
+
+    ```spl
+    index=challenge svcupdate host="THM-SHR-SRV"  EventCode=7045 
+    |  table Service_File_Name
+    |  sort - Time  
+    ```
+    The answer is `%SystemRoot%\svcupdate.exe`.
+
+2. What account was used to access the ADMIN$ share on the target server?
+
+    We can use the following query to find the account that was used to access the ADMIN$ share on the target server by filtering with the EventCode `5140` which is the event of detailed file share access and the keyword `ADMIN$`:
+
+    ```spl
+    index=challenge EventCode=5140 Share_Name IN ("*\\ADMIN$\*")
+    | table _time, host, Source_Address, user, Share_Name
+    | sort _time
+    ```
+
+    ![alt text](<Assets/Detecting AD Lateral Movement/8.png>)
+
+    The answer is `ryan.chen`.
+
+3. What is the source IP address of the lateral movement to THM-SHR-SRV?
+
+    We can found the answer in the previous query, which is `10.5.50.15`.
+
+4. What is the first remote command the attacker executed on the target machine? (Answer Format: as shown in the CommandLine field)
+
+    We can use the following query to find the first remote command the attacker executed on the target machine by filtering with the EventCode `1` and keyword `svcupdate` (the name of the service binary that was installed on the target):
+
+    ```spl
+    index=challenge EventCode=1 host=THM-SHR-SRV
+    | search CommandLine IN ("*svcupdate*")
+    | table _time, host, User, Image, CommandLine, LogonId
+    | sort _time    
+    ```
+
+    ![alt text](<Assets/Detecting AD Lateral Movement/9.png>)
+
+    The answer is `"cmd" /c "hostname & whoami & ipconfig"`.
+
+5. What host did the attack originate from?
+
+    In the previous query, we have found the `LogonId` field is `0x8C3EC`. We also get information the logon type is `3` which indicates an SMB or PsExec session. We can use this logon id to find the host that the attack originated from by filtering with the EventCode `4624`:
+
+    ```spl
+    index=challenge EventCode=4624 host=THM-SHR-SRV Logon_ID=0x8C3EC
+    | table _time, user, Logon_Type, Source_Network_Address, Logon_ID
+    ```
+    We will get the source ip address is `10.5.50.15`. We can use this source ip address to find the hostname of the source machine:
+
+    ```spl
+    index=challenge EventCode=4624 Source_Network_Address=10.5.50.15 user=*$
+    | stats count by user, Source_Network_Address
+    | sort -count    
+    ```
+    The answer is `THM-HR-WS`.
