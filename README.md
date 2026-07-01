@@ -8,6 +8,7 @@
 5. [Monitoring Active Directory](#monitoring-active-directory)
 6. [Detecting AD Initial Access](#detecting-ad-initial-access)
 7. [Detecting AD Lateral Movement](#detecting-ad-lateral-movement)
+8. [Detecting AD Credential Attacks](#detecting-ad-credential-attacks)
 
 ## Splunk: Exploring SPL
 ### Search and Reporting
@@ -1224,3 +1225,179 @@
     | sort -count    
     ```
     The answer is `THM-HR-WS`.
+
+
+## Detecting AD Credential Attacks
+### Detecting Kerberoasting
+1. How many service accounts were targeted by Kerberoasting?
+
+    We can use the following query to find the unique service accounts that were targeted by Kerberoasting by filtering with the EventCode `4769` which is the event of requesting a service ticket and excluding the service accounts that have `$` in their name and `krbtgt` since they are not service accounts that in 5 minutes time span:
+
+    ```spl
+    index=task2 EventCode=4769 Service_Name!="*$" Service_Name!="krbtgt"
+    | bin _time span=5m
+    | stats dc(Service_Name) as unique_spns count by Account_Name, Client_Address, _time
+    | where unique_spns > 5
+    ```
+    ![alt text](<Assets/Detecting AD Credential Attacks/1.png>)
+
+    The answer is `9`.
+
+2. What account requested the service tickets? (Answer Format: username only, without @domain)
+
+    We can check the `Account_Name` field in the previous query to find the account that requested the service tickets, which is `emma.wilson`.
+
+3. What source IP initiated the Kerberoasting?
+
+    We can check the `Client_Address` field in the previous query to find the source IP that initiated the Kerberoasting, which is `10.5.90.1`.
+
+### Detecting AS-REP Roasting
+1. Which account had preauthentication disabled? (Answer Format: username)
+
+    We can use the following query to find the account that had preauthentication disabled by filtering with the EventCode `4768` which is the event of requesting a TGT and checking the `Pre_Authentication_Type` field with value `0`:
+
+    ```spl
+    index=task3 EventCode=4768 Pre_Authentication_Type=0
+    | table _time, Account_Name, Pre_Authentication_Type, Ticket_Encryption_Type, Client_Address
+    ```
+    The answer is `alex.reed`.
+
+### Detecting LSASS Credential Dumping
+1. What is the full path of the process that accessed lsass.exe?
+
+    We can use the following query to find the full path of the process that accessed `lsass.exe` by filtering with the EventCode `10` which is the event of process access and checking the `TargetImage` field with value `*\\lsass.exe`:
+
+
+    ```spl
+    index=task4 EventCode=10 TargetImage="*\\lsass.exe"
+    | stats count by SourceImage, GrantedAccess
+    ```
+
+    ![alt text](<Assets/Detecting AD Credential Attacks/2.png>)
+
+    We can see the unusual process that accessed `lsass.exe` is `C:\Windows\Temp\procdump64.exe`. So the answer is `C:\Windows\Temp\procdump64.exe`.
+
+2. What GrantedAccess value was used? (Answer Format: 0xNNNNNN)
+
+    We can check the `GrantedAccess` field in the previous query to find the GrantedAccess value that was used, which is `0x1FFFFF`.
+
+3. Which DLL in the CallTrace reveals the dump method?
+
+    We can use the following query to find the DLL in the CallTrace that reveals the dump method by filtering with the EventCode `10` which is the event of process access and checking the `TargetImage` field with value `*\\lsass.exe` and `SourceImage` field with value `C:\Windows\Temp\procdump64.exe`:
+
+    ```spl
+    index=task4 EventCode=10 TargetImage="*\\lsass.exe" SourceImage=C:\\Windows\\Temp\\procdump64.exe
+    | table _time, SourceImage, SourceUser, GrantedAccess, CallTrace
+    ```
+    The answer is `dbgcore.dll`.
+
+### Detecting DCSync 
+1. What account performed the DCSync?
+
+    We can use the following query to find the account that performed the DCSync by filtering with the EventCode `4662` which is the event of object access and excluding the computer accounts that have `$` in their name:
+
+    ```spl
+    index=task5 EventCode=4662 "1131f6ad" user!="*$"
+    | table _time, user, Access_Mask, Properties Logon_ID
+    | sort _time
+    ```
+
+    ![alt text](<Assets/Detecting AD Credential Attacks/3.png>)
+
+    The answer is `adm-luke.sullivan`.
+
+2. What is the Logon_ID of the DCSync session? (Answer Format: 0xNNNNNNN)
+
+    We can check the `Logon_ID` field in the previous query to find the Logon_ID of the DCSync session, which is `0x5A01668`.
+
+3. What source IP initiated the DCSync?
+
+    We can correlate the Logon_ID from the previous query with the EventCode `4624` which is the event of successful login to find the source IP that initiated the DCSync:
+
+    ```spl
+    index=task5 EventCode=4624 Logon_ID=0x5A01668
+    | table _time, host, user, Source_Network_Address, Logon_Type
+    ```
+    The answer is `10.5.90.1`.
+
+### Detecting NTDS.dit Extraction
+1. What is the full command line used to extract NTDS.dit? (Answer Format: full command line as shown in Splunk)
+
+    We can use the following query to find the full command line used to extract `NTDS.dit` by filtering with the EventCode `1` which is the event of process creation and checking the `Image` field with value `*\ntdsutil.exe`:
+
+    ```spl
+    index=task6 EventCode=1 Image="*\ntdsutil.exe"
+    | table _time, host, User, ParentImage, Image, CommandLine
+    ```
+    The answer is `ntdsutil  "ac i ntds" "ifm" "create full C:\Perflogs\1" q q`.
+
+2. What is the full shadow copy path the attacker copied ntds.dit from? (Answer Format: full path as shown in the CommandLine)
+
+    We can use the following query to find the full shadow copy path the attacker copied `ntds.dit` from by filtering with the EventCode `1` which is the event of process creation and checking the `CommandLine` field with value `*HarddiskVolumeShadowCopy*` and `*ntds*` or `*SYSTEM*`:
+
+    ```spl
+    index=task6 EventCode=1 CommandLine="*HarddiskVolumeShadowCopy*" (CommandLine="*ntds*" OR CommandLine="*SYSTEM*")
+    | table _time, host, User, ParentImage, Image, CommandLine
+    ```
+    ![alt text](<Assets/Detecting AD Credential Attacks/4.png>)
+
+    The answer is `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7\Windows\NTDS\ntds.dit`.
+
+3. Where did the attacker stage the files copied from the shadow copy? (Answer Format: directory path)
+
+    We can check the `CommandLine` field in the previous query to find where the attacker staged the files copied from the shadow copy, which is `C:\Windows\Temp`.
+
+### Investigation Challenge
+1. Which account was targeted by AS-REP Roasting?
+
+    We can use the following query to find the account that was targeted by AS-REP Roasting by filtering with the EventCode `4768` which is the event of requesting a TGT and checking the `Pre_Authentication_Type` field with value `0`:
+
+    ```spl
+    index=task7 EventCode=4768 Pre_Authentication_Type=0
+    | table _time, Account_Name, Pre_Authentication_Type, Ticket_Encryption_Type, Client_Address
+    ```
+    The answer is `mia.turner`.
+
+2. What account performed the Kerberoasting? (Answer Format: username only, without @domain)
+
+    We can use the following query to find the account that performed the Kerberoasting by filtering with the EventCode `4769` which is the event of requesting a service ticket and excluding the service accounts that have `$` in their name and `krbtgt` since they are produce large noise because they are Normal Kerberos traffic:
+
+    ```spl
+    index=task7 EventCode=4769 Ticket_Encryption_Type=0x17 Service_Name!="*$" Service_Name!="krbtgt"
+    | table _time, Account_Name, Service_Name, Ticket_Encryption_Type, Client_Address
+    | sort _time
+    ```
+
+    ![alt text](<Assets/Detecting AD Credential Attacks/5.png>)
+
+    The answer is `nathan.brooks`.
+
+3. What process accessed LSASS on the workstation?
+
+    We can use the following query to find the process that accessed `LSASS` on the workstation by filtering with the EventCode `10` which is the event of process access and checking the `TargetImage` field with value `*\\lsass.exe`:
+
+    ```spl
+    index=task7 EventCode=10 TargetImage="*\\lsass.exe"
+    | stats count by SourceImage, GrantedAccess
+    ```
+    ![alt text](<Assets/Detecting AD Credential Attacks/6.png>)
+
+    The answer is `rundll32.exe`.
+
+4. What GrantedAccess value was used for the LSASS dump? (Answer Format: 0xNNNNNN)
+
+    We can check the `GrantedAccess` field in the previous query to find the GrantedAccess value that was used for the LSASS dump, which is `0x1FFFFF`.
+
+5. What account performed the DCSync attack?
+
+    We can use the following query to find the account that performed the DCSync attack by filtering with the EventCode `4662` which is the event of object access and excluding the computer accounts that have `$` in their name:
+
+    ```spl
+    index=task7 EventCode=4662 "1131f6ad" user!="*$"
+    | table _time, user, Access_Mask, Properties
+    | sort _time
+    ```
+
+    ![alt text](<Assets/Detecting AD Credential Attacks/7.png>)
+
+    The answer is `adm-luke.sullivan`.
