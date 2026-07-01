@@ -9,6 +9,7 @@
 6. [Detecting AD Initial Access](#detecting-ad-initial-access)
 7. [Detecting AD Lateral Movement](#detecting-ad-lateral-movement)
 8. [Detecting AD Credential Attacks](#detecting-ad-credential-attacks)
+9. [Detecting AD Post-Exploitation](#detecting-ad-post-exploitation)
 
 ## Splunk: Exploring SPL
 ### Search and Reporting
@@ -1401,3 +1402,137 @@
     ![alt text](<Assets/Detecting AD Credential Attacks/7.png>)
 
     The answer is `adm-luke.sullivan`.
+
+
+## Detecting AD Post-Exploitation
+### AD Post-Exploitation
+1. What type of files did Volt Typhoon exfiltrate based on the CISA report (opens in new tab)?
+
+    The answer is `zip`.
+
+2. What protocol did Volt Typhoon use for the exfiltration process based on the CISA report? (opens in new tab)
+
+    The answer is `SMB`.
+
+3. What MITRE ATT&CK technique ID is associated with exfiltration in the Synnovis 2024 ransomware attack on UK Healthcare based on the report? (opens in new tab)
+
+    The answer is `T1041`.
+
+### Long-Term Persistence
+1. From which directory was the malicious file executed as mentioned in the scenario?
+
+    We can use the following query to filter with the keyword `updater.exe` to find the directory from which the malicious file was executed:
+
+    ```spl
+    index=task3 updater.exe
+    ```
+    We can check the `Image` field to find the directory from which the malicious file was executed, which is `C:\Users\maria.garcia\AppData\Roaming`.
+
+2. Which user did the attacker create on the system as a persistence mechanism?
+
+    If we check examine the previous query, we will found out that the `maria.garcia` account was used to execute the malicious file. We can assume that account has been compromised. We can use the following query to find the user that the attacker created on the system as a persistence mechanism by filtering with the EventCode `4720` which is the event of creating a new user:
+
+    ```spl
+    index=task3 EventCode=4720 maria.garcia
+    ```
+    The answer is `hans.schmidt`.
+
+3. What is the name of the group this account was added to for remote access?
+
+    We can use the following query to find the group that the `hans.schmidt` account was added to for remote access:
+
+    ```spl
+    index=task3 hans.schmidt
+    ```
+    ![alt text](<Assets/Detecting AD Post-Exploitation/1.png>)
+
+    The answer is `Remote Desktop Users`.
+
+4. What time was this account added to the Domain Admins group?
+
+    We can use the following query to find the time when the `hans.schmidt` account was added to the Domain Admins group by filtering with the EventCode `4728` which is the event of adding a user to a group:
+
+    ```spl
+    index=task3 hans.schmidt EventCode=4728
+    | sort Time
+    ```
+    The answer is `02/20/2026 09:41:07`.
+
+5. Did the attacker later use this account to log in? (Yes / Nop)
+
+    We can examine the logs by filtering with `hans.schmidt` keyword. The answer is `Nop`.
+
+### Ransomware Detection 1
+1. What command did the attacker use to view available VSS shadow copies?
+
+    We can use the following query to find the command that the attacker used to view available VSS shadow copies by filtering with the keyword `vssadmin`:
+
+    ```spl
+    index=task4 vssadmin
+    ```
+    We can check the `CommandLine` field to find the command that the attacker used to view available VSS shadow copies, which is `vssadmin list shadows`.
+
+2. What was the PID of the process that successfully deleted the VSS shadow copies on DC-01?
+
+    We can still use the previous query to find the PID of the process that successfully deleted the VSS shadow copies. 
+
+    ![alt text](<Assets/Detecting AD Post-Exploitation/2.png>)
+
+    The answer is `5520`.
+
+3. Which logs did the attacker delete on DC-01?
+
+    We can use the following query to find which logs the attacker deleted on DC-01 by filtering with the EventCode `1102` which is the event of clearing the event log:
+
+    ```spl
+    index=task4 EventCode=1102
+    ```
+    We can check the `LogName` field to find which logs the attacker deleted on DC-01, which is `Security`.
+
+### Ransomware Detection 2
+1. What is the full path to the ransomware executable that was created on TSM-PROD-01?
+
+    We can use the following query to find the full path to the ransomware executable that was created on TSM-PROD-01 by filtering with the EventCode `11` which is the event of file creation:
+
+    ```spl
+    index=task5 EventCode=11 TSM-PROD-01
+    ```
+
+    The answer is `C:\Windows\fixer.exe`.
+
+2. What is the MITRE ATT&CK ID of the method the attacker used to execute ransomware on domain systems?
+
+    We can use the following query to find the details of the ransomware execution by filtering with the keyword `fixer.exe`:
+
+    ```spl
+    index=task5 TSM-PROD-01 fixer.exe
+    ```
+    ![alt text](<Assets/Detecting AD Post-Exploitation/3.png>)
+
+    We can see that the attacker used `wmic` to execute the ransomware on domain systems. The MITRE ATT&CK ID of this method is `T1047`.
+
+3. How many systems were targeted for ransomware execution by the attacker?
+
+    We can use the following query to find how many systems were targeted for ransomware execution by filtering with the keyword `fixer.exe`:
+
+    ```spl
+    index=task5 fixer.exe
+    ```
+    The attacker targeted `tsm-prod-06.trysaveme.local`, `tsm-prod-05.trysaveme.local`, `tsm-prod-04.trysaveme.local`, `tsm-prod-03.trysaveme.local`, `tsm-prod-02.trysaveme.local`, and `tsm-prod-01.trysaveme.local`. So the answer is `6`.
+
+4. Did the attacker successfully execute the ransomware on the hosts? (Yes/Nop)
+
+    There is no confirmation in the logs that the attacker successfully executed the ransomware on the hosts. So the answer is `Nop`.
+
+### Data Destruction
+1. What is the MITRE ATT&CK ID for the Data Destruction technique under the Impact tactic?
+
+    The answer is `T1485`.
+
+2. What service did HermeticWiper use for CDN payload delivery?
+
+    The answer is `Discord`.
+
+3. What protocol did Apostle Wiper use for tunneling?
+
+    The answer is `RDP`.
